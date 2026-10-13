@@ -1,0 +1,207 @@
+# wb-openai — WorkBuddy / CodeBuddy 订阅 → OpenAI 兼容 API
+
+把你本机已登录的 **WorkBuddy / CodeBuddy 桌面端订阅**，变成一个标准的 OpenAI 兼容服务，
+让 Cherry Studio / NextChat / LobeChat / Open WebUI / 任意 OpenAI SDK 客户端直接复用。
+
+自带 **Web 控制面板**，双击启动、页面上一个按钮开关，不用碰命令行。
+支持 **macOS / Windows / Linux**。
+
+---
+
+## 一、30 秒上手
+
+### macOS
+
+双击 **`启动面板.command`** → 浏览器自动打开控制面板 → 点「开启服务」。
+
+> 首次双击如提示"无法打开，因为它来自身份不明的开发者"：右键点文件 → 选「打开」→ 再点「打开」。
+> 或者终端里执行一次 `chmod +x 启动面板.command`。
+
+### Windows
+
+双击 **`start-panel.bat`** → 浏览器自动打开控制面板 → 点「开启服务」。
+
+> 需要先装 Python 3.8+（[python.org](https://www.python.org/downloads/)），
+> 安装时记得勾选 **Add Python to PATH**。
+
+### 首次运行会做什么
+
+自动在本目录建 `.venv` 并装依赖（fastapi / uvicorn / httpx / cryptography），
+不污染系统 Python。装完自动起面板并打开浏览器。之后启动就是秒开。
+
+### 客户端怎么填
+
+| 项 | 值 |
+|---|---|
+| API Base | `http://127.0.0.1:8787/v1` |
+| API Key | 留空（未启用鉴权） |
+| 模型名 | `glm-5.2` / `kimi-k2.7` / `deepseek-v4-pro` / `deepseek-v4-flash` / `auto` 等 |
+
+可用模型：`glm-5.2`、`glm-5.1`、`glm-5v-turbo`、`kimi-k2.7`、`kimi-k2.6`、`kimi-k2.5`、
+`deepseek-v4-pro`、`deepseek-v4-flash`、`minimax-m3-pay`、`hy3-preview-agent`、`auto`
+
+---
+
+## 二、控制面板
+
+面板常驻在 `127.0.0.1:8788`，转换器在 `127.0.0.1:8787`，由面板拉起和关停。
+
+| 页面元素 | 说明 |
+|---|---|
+| 状态灯 + 开启/关闭按钮 | 一键启停转换器 |
+| 账号与凭据 | 显示账号、uid、token 类型与有效期（不显示 token 内容） |
+| 客户端接入 | 直接展示 API Base，带一键复制 |
+| 运行日志 | 实时显示转换器输出 |
+
+面板参数：
+
+```bash
+python3 wb_panel.py                     # 默认 8788 + 自动开浏览器
+python3 wb_panel.py --no-browser        # 不开浏览器
+python3 wb_panel.py --port 9000         # 换转换器端口
+python3 wb_panel.py --device-token      # 开启时附设备风控头
+python3 wb_panel.py --desensitize       # 开启时启用脱敏
+```
+
+---
+
+## 三、实测状态（2026-10-13，macOS + WorkBuddy 5.7.7）
+
+| 能力 | 结果 |
+|---|---|
+| 凭据解密（新版加密信封） | ✅ |
+| `GET /health` / `GET /v1/models` | ✅ |
+| 非流式对话 | ✅ usage 完整 |
+| 流式 SSE | ✅ 增量输出 |
+| Function Calling | ✅ `finish_reason: tool_calls` |
+| 多轮工具结果回传 | ✅ |
+| 多模型切换 | ✅ `glm-5.2` / `deepseek-v4-flash` |
+| 桌面端自动刷新 token 后 | ✅ 转换器自动重新解密，无需重启 |
+| 面板一键启停 | ✅ 开启后即可对话，关闭后端口立即释放 |
+| 依赖自举（空环境） | ✅ 自动建 venv、装依赖、起面板 |
+
+---
+
+## 四、原理与实现取舍
+
+### 它怎么工作
+
+```
+OpenAI 兼容客户端
+   │  POST /v1/chat/completions
+   ▼
+converter.py  (本地 FastAPI, 127.0.0.1:8787)
+   │  解密本机凭据 → 注入 Authorization / X-User-Id 等头
+   ▼
+copilot.tencent.com/v2/chat/completions   ← 后端本身就是标准 OpenAI 协议
+```
+
+function calling 是后端原生能力（`tools` / `tool_calls`），不需要 prompt 注入或文本解析。
+
+### 为什么需要解密
+
+新版桌面端把 auth 文件里的敏感字段写成了加密信封：
+
+```
+auth.accessToken  : {"$wbEncrypted":1, "envelope":"eyJ..."}   ← 不是明文
+auth.refreshToken : {"$wbEncrypted":1, "envelope":"..."}
+account.nickname / phoneNumber : 同样加密
+```
+
+直接拼 `Bearer {accessToken}` 会得到 `Bearer {'$wbEncrypted': 1, ...}` —— 后端一律 401。
+
+**解密流程：**
+
+1. 用 `ELECTRON_RUN_AS_NODE=1` 跑本机安装的 Electron 主二进制，调
+   `process._linkedBinding('electron_browser_workbuddy_storage').loggerGet()`
+   拿 `atRestSecretKey`（base64 字符串）
+2. `key = sha256(atRestSecretKey 字符串)`，`keyId = sha256(key).hexdigest()[:16]`
+3. 信封 `{suite:1, keyId, nonce(12B), authTag(16B), ciphertext}` → AES-256-GCM，
+   AAD 按官方 `WB-AAD\0\x01 + WBEV1 + sym-v1 + 1 + keyId` 帧构造
+4. 递归替换 JSON 里所有 `$wbEncrypted` 节点
+
+密钥只在进程内存里，不落盘、不写进任何文件。
+
+### 四个设计取舍
+
+**1. 不改客户端文件。** 全程只读 `.info`。即使 token 过期需要刷新，也只在内存里换新 token，
+不会把明文写回客户端的加密文件（那会把桌面端搞坏）。桌面端自己刷新文件时，转换器靠
+mtime 变化自动重新解密，无需重启。
+
+**2. UA 用官方三段式。** `WorkBuddy/5.7.7 WorkBuddy/5.7.7 CLI/5.7.7`，版本号从安装包
+`app.asar.unpacked/cli/product.json` 实读，不写死。
+
+**3. 设备风控头默认关闭。** 实测普通对话不需要 `X-Device-Token`。该头要调桌面端自带的
+TuringShield SDK（`native/turing-sdk`），在某些环境会超时失败。真被风控拦了再加 `--device-token`。
+
+**4. 只监听 127.0.0.1。** 不对外暴露。要局域网/公网用，自己决定风险。
+
+---
+
+## 五、命令行用法（不用面板）
+
+```bash
+python3 converter.py --port 8787 --log ~/wb-openai.log
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--host` / `--port` | `127.0.0.1` / `8787` | 监听地址与端口 |
+| `--api-key` | 无 | 启用客户端鉴权（也可用环境变量 `CODEBUDDY2OPENAI_KEY`） |
+| `--log PATH` | 无 | 写日志，含请求 ID / 模型 / 耗时 / finish_reason / token 数 |
+| `--device-token` | 关 | 注入 `X-Device-Token` 设备风控头 |
+| `--desensitize` | 关 | 对 system 里合规敏感词插零宽空格，缓解后端误拦 |
+| `--skip-check` | 否 | 跳过启动预检 |
+
+验证：
+
+```bash
+curl http://127.0.0.1:8787/health
+curl http://127.0.0.1:8787/v1/models
+curl -N http://127.0.0.1:8787/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm-5.2","stream":true,"messages":[{"role":"user","content":"你好"}]}'
+```
+
+---
+
+## 六、常见问题
+
+**找不到登录文件** —— 桌面端要**登录进去**，不是只装。
+路径：macOS `~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/*.info`；
+Windows `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\*.info`。
+
+**提示"无法从客户端读取解密能力"** —— 确认桌面端装在默认位置
+（macOS `/Applications/WorkBuddy.app`，Windows `C:\WorkBuddy`）。
+装到别处可设环境变量 `WORKBUDDY_TURING_SDK_DIR` 指向 `native/turing-sdk` 目录。
+
+**客户端报 401** —— 转换器用的是后端 401，说明 token 失效。在桌面端重新登录一次即可。
+
+**响应慢** —— 换 `deepseek-v4-flash`。
+
+**"敏感内容"被拦截** —— 后端内容审核（腾讯合规策略）。常见误伤是客户端注入的 system
+提示里含安全英文术语。用 `--desensitize`。
+
+---
+
+## 七、文件
+
+```
+wb-openai/
+├── 启动面板.command    # macOS 双击启动
+├── start-panel.bat     # Windows 双击启动
+├── bootstrap.py        # 依赖自举（建 venv + 装依赖 + 转发执行）
+├── wb_panel.py         # Web 控制面板
+├── converter.py        # 转换器主程序
+├── wb_decode.py        # 凭据解密模块
+├── desensitize.py      # 脱敏模块（可选）
+├── turing_helper.js    # 设备风控头助手（可选）
+└── start.sh            # 纯命令行启动
+```
+
+---
+
+## 八、免责声明
+
+个人学习研究用途，非官方产品，与腾讯 / CodeBuddy / OpenAI 无关联。
+仅在拥有合法订阅的前提下自用，遵守相关服务条款，自负风险。
