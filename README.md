@@ -82,6 +82,47 @@ Cherry Studio / NextChat / LobeChat / Open WebUI 等走 `/v1/chat/completions`
 
 ---
 
+## ✅ 接入 DeepSeek Harness（dsh）—— 实测可用
+
+dsh 走标准 `openai-completions` 协议，且它的系统提示不含竞品指纹，
+**实测完整 agent 流程全部通过**（发 24 个工具的请求、读文件、写文件都不被拦）。
+
+### 一键接入
+
+```bash
+cd ~/wb-openai
+python3 setup-dsh.py --profiles web,headless --set-default
+```
+
+脚本会（全部先备份为 `*.bak-wb`）：
+
+1. 在 dsh 的 profile 补丁层声明 `wb-local` 路由 → `http://127.0.0.1:8787/v1`
+2. 在 `~/.dsh/.credentials.yaml` 的 `refs` 补一个占位 key
+   （网关默认不校验鉴权，但 dsh 要求该字段必须存在）
+3. `--set-default` 时把 `agent-default-model` 指向 `wb-local / glm-5.2`
+
+还原：`python3 setup-dsh.py --restore --profiles web,headless`
+
+### 实测结果（2026-10-13）
+
+| 检查项 | 结果 |
+|---|---|
+| `dsh --profile web --dump-config` 出现 `wb-local` | ✅ |
+| `dsh headless "只回复两个字：在的"` | ✅ 返回「在的」 |
+| 完整 agent 任务（读 a.txt → 建 b.txt → 写入内容） | ✅ 文件真的被创建、内容正确 |
+| 请求规模 | 24 个工具 + 多轮，未被上游风控拦 |
+| `dsh web` 启动 | ✅ 正常，模型选择器里可选「WorkBuddy 本地网关」 |
+
+### 说明
+
+- `desktop` profile 由 Electron 应用独占管理（`dsh --profile desktop` 会报
+  "managed exclusively by the Electron application"），脚本默认不动它。
+- 用 dsh 前记得先启动网关；网关没起 dsh 会报连接失败。
+- 模型可在 dsh 的 设置 → 模型 里切换（`wb-local` 下有 GLM-5.2 / DeepSeek V4 /
+  Kimi / auto）。headless 没有选择器，用 `--set-default` 或 `--patch` 指定。
+
+---
+
 ## 二、控制面板
 
 面板常驻在 `127.0.0.1:8788`，转换器在 `127.0.0.1:8787`，由面板拉起和关停。
