@@ -3,8 +3,12 @@
 **让你的本地 agent 用上 WorkBuddy 的积分。**
 
 把本机已登录的 WorkBuddy / CodeBuddy 桌面端订阅，变成一个标准的 OpenAI 兼容服务，
-再一键接进 **DeepSeek Harness（dsh）** —— 之后 `dsh headless "任务"`、`dsh web`
-跑的就是 WorkBuddy 积分里的 GLM-5.2 / Kimi / DeepSeek V4。
+再接入 **DeepSeek Harness（dsh）** —— 之后 dsh 跑的就是 WorkBuddy 积分里的
+GLM-5.2 / Kimi / DeepSeek V4。
+
+**dsh 有两种用法，配置方式完全不同**：
+🖥️ **桌面端 App** 在界面里手动配（[看这里](#21-桌面端-appgui-必看)）；
+⌨️ **命令行 / 服务端** 跑一条脚本（[看这里](#22-命令行--服务端-一键脚本)）。
 
 自带 **Web 控制面板**，双击启动、页面上一个按钮开关，不用碰命令行。
 支持 **macOS / Windows / Linux**。
@@ -30,25 +34,78 @@
 
 ### 2. 接进 dsh
 
-```bash
-cd ~/wb-openai
-python3 setup-dsh.py --profiles web,headless --set-default
-```
+**dsh 有两种用法，配置方式完全不同，别搞混：**
+
+| 你用哪个 | 怎么配 | 跳到 |
+|---|---|---|
+| 🖥️ **桌面端 App**（图形界面，双击图标打开那个） | 在 App 的 **设置 → 模型** 里手动填 | [2.1](#21-桌面端-appgui-必看) |
+| ⌨️ **命令行 / 服务端**（`dsh web`、`dsh headless`） | 跑一条脚本 | [2.2](#22-命令行--服务端-一键脚本) |
+
+> **桌面端不要用脚本。** 桌面端用的 `desktop` profile 由 Electron 应用独占管理，
+> 脚本默认不碰它，跑了也没用，还容易把配置搞乱。
 
 ### 3. 用
 
 ```bash
-dsh headless "读一下 a.txt 并总结"     # 一次性任务
-dsh web                                 # 浏览器界面
+dsh headless "读一下 a.txt 并总结"     # 一次性任务（命令行）
+dsh web                                 # 浏览器界面（命令行）
 ```
 
-完事。`dsh` 现在跑的就是 WorkBuddy 的积分。
+桌面端就正常打开 App 用。
 
 ---
 
 ## 二、接入 DeepSeek Harness（dsh）
 
-### 一键配置脚本
+### 2.1 桌面端 App（GUI）—— 必看
+
+> ⚠️ **桌面端的配置只能在这个 App 里改。**
+> 它用的是 `desktop` profile，由 Electron 应用**独占管理** —— 用命令行访问会直接报
+> `profile "desktop" is managed exclusively by the Electron application`。
+> **也千万不要手改** `~/.dsh/profiles/desktop/cordis.patch.yml`：
+> App 每次保存都会**整份重写**这个文件，你的手改会丢。
+
+**怎么配**：打开桌面端 App → **设置 → 模型 → 添加模型提供商**，按下表填：
+
+| 字段 | 填什么 |
+|---|---|
+| 显示名称 | 随便，例如 `workbuddy` |
+| API 地址 | `http://127.0.0.1:8787/v1` |
+| **API 协议** | **必须选 `OpenAI Chat Completions`** |
+| **API Key** | **必须填**。网关不校验鉴权，填 `1` 都行 —— 但**留空一定失败** |
+| 模型 → ID | 网关认识的真实模型名，如 `glm-5.2`、`deepseek-v4-flash`、`kimi-k2.7` |
+| 模型 → 名称 | 随便，只用于显示 |
+
+想一次配多个模型，点「**添加模型**」加行即可（同一个地址 + 协议，模型 ID 各填一行）。
+
+保存后，在 App 的对话界面把模型切到刚配的那个就能用。
+
+#### ⚠️ 三个高频错误
+
+| 症状 | 原因 | 改法 |
+|---|---|---|
+| `404 {"detail":"Not Found"}` | 协议选成了 **`Anthropic Messages`** | 客户端会去打 `/v1/messages`，**网关没这个端点**。改成 `OpenAI Chat Completions` |
+| `PI_AI_ERROR: No API key for provider: xxx` | **API Key 字段留空** | 填个值（随便填）。dsh 强制要求该字段存在，哪怕网关根本不校验 |
+| 手改的配置莫名消失 | 手改了 `cordis.patch.yml` | App 保存时会整份重写。改配置一律在 App 里改 |
+
+> 下拉里三个选项对应的实际协议：`OpenAI Chat Completions` → `openai-completions`、
+> `OpenAI Responses` → `openai-responses`、`Anthropic Messages` → `anthropic-messages`。
+> **前两个都能用**，第三个不行。
+
+#### 配完自检
+
+```bash
+cd ~/wb-openai
+python3 check-dsh.py --profile desktop
+```
+
+会逐项报协议、API Key、模型名、默认模型对不对，有问题直接说是哪儿错、怎么改。
+
+---
+
+### 2.2 命令行 / 服务端 —— 一键脚本
+
+> 这一段**只适用于** `dsh web` / `dsh headless`。桌面端请回 [2.1](#21-桌面端-appgui-必看)。
 
 ```bash
 python3 setup-dsh.py --profiles web,headless --set-default
@@ -69,27 +126,40 @@ python3 setup-dsh.py                                       # 只声明路由，�
 python3 setup-dsh.py --set-default --profiles headless     # 只处理某个 profile
 ```
 
-> `desktop` profile 由 Electron 应用**独占管理**（`dsh --profile desktop` 会直接报
-> "managed exclusively by the Electron application"），脚本默认不碰它。
+---
 
-### 实测结果（2026-10-13，macOS）
+### 2.3 配置体检
+
+```bash
+python3 check-dsh.py                    # 检查所有 profile
+python3 check-dsh.py --profile desktop
+```
+
+只读，不改任何文件。会检查：协议对不对、`apiKeyEnv` 有没有且凭据存不存在、
+模型名网关认不认识、默认模型指向是否有效。
+
+---
+
+### 2.4 实测结果（2026-10-13，macOS）
 
 | 检查项 | 结果 |
 |---|---|
+| 桌面端 App 配置（协议 / Key / 模型 / 默认） | ✅ `check-dsh.py` 全绿 |
 | `dsh headless "只回复两个字：在的"` | ✅ 返回「在的」 |
 | 完整 agent 任务（读 a.txt → 建 b.txt → 写入内容） | ✅ 文件真的被创建、内容正确 |
 | 请求规模 | 24 个工具 + 多轮对话，**未被上游风控拦** |
 | `dsh --profile web --dump-config` 出现 `wb-local` | ✅ |
 | `dsh web` 启动 + 模型选择器 | ✅ 可选「WorkBuddy 本地网关」 |
 
-### 可选模型
+### 2.5 可选模型
 
-`wb-local` 路由下默认声明了：GLM-5.2、GLM-5.1、DeepSeek V4 Pro、DeepSeek V4 Flash、
-Kimi K2.7、auto。
-
-网关实际支持的完整列表：`glm-5.2`、`glm-5.1`、`glm-5v-turbo`、`kimi-k2.7`、`kimi-k2.6`、
+网关支持的完整列表：`glm-5.2`、`glm-5.1`、`glm-5v-turbo`、`kimi-k2.7`、`kimi-k2.6`、
 `kimi-k2.5`、`deepseek-v4-pro`、`deepseek-v4-flash`、`minimax-m3-pay`、`hy3-preview-agent`、`auto`。
-想加就在 `~/.dsh/profiles/<name>/cordis.patch.yml` 的 `models` 列表里补一行。
+
+命令行那套的 `wb-local` 路由默认声明了 GLM-5.2、GLM-5.1、DeepSeek V4 Pro、
+DeepSeek V4 Flash、Kimi K2.7、auto；想加就在 `cordis.patch.yml` 的 `models` 列表里补一行，
+或重跑 `setup-dsh.py`（幂等）。
+桌面端在 App 里点「添加模型」加行即可。
 
 ---
 
@@ -298,8 +368,16 @@ curl -N http://127.0.0.1:8787/v1/chat/completions \
 
 **dsh 报连接失败** —— 网关没起。先双击启动面板并点「开启服务」。
 
-**dsh 报 `No API key for provider`** —— `setup-dsh.py` 没跑成功，或
-`~/.dsh/.credentials.yaml` 里缺 `WB_LOCAL_API_KEY`。重跑脚本即可。
+**dsh 报 `404 {"detail":"Not Found"}`** —— 协议选错了，八成选了 `Anthropic Messages`。
+改成 `OpenAI Chat Completions`。见 [2.1](#21-桌面端-appgui-必看)。
+
+**dsh 报 `PI_AI_ERROR: No API key for provider`** —— API Key 字段留空了，
+或 `apiKeyEnv` 指向的凭据不存在。桌面端在 App 里填上；命令行重跑 `setup-dsh.py`。
+
+**`TRANSPORT: Connection error`** —— 连不上网关。先确认面板里是「运行中」，
+再 `curl http://127.0.0.1:8787/health` 看看。
+
+**不确定哪儿配错了** —— `python3 check-dsh.py` 直接告诉你。
 
 **找不到登录文件** —— 桌面端要**登录进去**，不是只装。
 路径：macOS `~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/*.info`；
@@ -328,7 +406,8 @@ wb-openai/
 ├── converter.py        # 转换器主程序
 ├── wb_decode.py        # 凭据解密模块
 ├── responses_adapter.py# Responses API ↔ Chat 适配（来自 xiaofan6ya/workbuddy2api, MIT）
-├── setup-dsh.py        # DeepSeek Harness 一键接入
+├── setup-dsh.py        # DeepSeek Harness 一键接入（命令行 profile）
+├── check-dsh.py        # dsh 配置体检（只读，桌面端也能查）
 ├── desensitize.py      # 脱敏模块（可选）
 ├── turing_helper.js    # 设备风控头助手（可选）
 └── start.sh            # 纯命令行启动
