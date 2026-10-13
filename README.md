@@ -42,6 +42,46 @@
 
 ---
 
+## ⚠️ 关于 Codex CLI（实测结论，2026-10-13）
+
+网关已实现 `/v1/responses`（Responses API），**协议层面 Codex CLI 能接通**，
+但实际发请求会被上游拦下：
+
+```
+HTTP 400  {"code":11128, "msg":"Illegal API invocation from an unapproved channel"}
+```
+
+**根因（已二分定位）**：腾讯在后端识别并拦截竞品 CLI 的客户端指纹。
+Codex 系统提示开头这 185 个字符是精准触发点：
+
+> You are a coding agent running in the Codex CLI, a terminal-based coding assistant.
+> Codex CLI is an open source project led by OpenAI.
+> You are expected to be precise, safe, and helpful.
+
+实验矩阵：
+
+| 测试 | 结果 |
+|---|---|
+| 三句连在一起（Codex 原文） | ❌ 被拦 |
+| 任意两句组合 / 删掉任意一句 | ✅ 通过 |
+| 前面加一句中性话 | ✅ 通过 |
+| Claude Code 的自我介绍 | ❌ 被拦 |
+| Cursor 风格 / 通用 coding agent 声明 | ✅ 通过 |
+| 800 字中性 system prompt | ✅ 通过 |
+| 工具数量（1 个 vs 11 个） | 无关 |
+| 请求总长度 | 无关（截到 2000 字仍触发） |
+| `--desensitize` 脱敏 | 无效（整串指纹匹配，非关键词） |
+
+也就是说：**这不是协议问题，是腾讯主动的渠道管控**。
+让 Codex 走这个订阅需要改写客户端系统提示去规避识别 —— 那属于绕风控，
+本项目不做，也不建议（账号有被限制的风险，且是长期猫鼠游戏）。
+
+**想用 Codex 的话**：继续用你现有的第三方 provider。本网关适用于
+Cherry Studio / NextChat / LobeChat / Open WebUI 等走 `/v1/chat/completions`
+的标准客户端，这些不受该指纹拦截影响。
+
+---
+
 ## 二、控制面板
 
 面板常驻在 `127.0.0.1:8788`，转换器在 `127.0.0.1:8787`，由面板拉起和关停。

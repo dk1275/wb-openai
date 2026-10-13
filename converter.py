@@ -27,6 +27,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Optional
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -40,6 +41,14 @@ try:
 except ImportError:  # 模块缺失时降级为不脱敏
     def desensitize_body(body, roles=("system",)):
         return body
+
+try:
+    from responses_adapter import ResponsesStreamConverter, responses_request_to_chat
+except ImportError:  # 模块缺失时 /v1/responses 不可用，其余功能不受影响
+    ResponsesStreamConverter = None
+
+    def responses_request_to_chat(body):
+        raise RuntimeError("responses_adapter 模块缺失，无法处理 Responses API 请求")
 
 BACKEND = "https://copilot.tencent.com"
 DEFAULT_DOMAIN = "www.codebuddy.cn"
@@ -339,7 +348,8 @@ PASSTHROUGH_BODY_KEYS = {
 
 app = FastAPI(title="wb-openai", version="2.1")
 CONFIG: dict = {"api_key": "", "cred": None, "log_path": None,
-                "desensitize": False, "device_token": False}
+                "desensitize": False, "device_token": False,
+                "default_model": "auto", "dump_body": False}
 
 _LOG_LOCK = threading.Lock()
 
@@ -387,7 +397,9 @@ def health():
     info: dict = {"status": "ok", "platform": sys.platform, "python": sys.version.split()[0],
                   "mode": "decrypt-proxy", "user_agent": client_user_agent(),
                   "auth_file": str(find_auth_file() or "(未找到)"),
-                  "device_token": bool(CONFIG.get("device_token"))}
+                  "device_token": bool(CONFIG.get("device_token")),
+                  "responses_api": ResponsesStreamConverter is not None,
+                  "default_model": CONFIG.get("default_model")}
     if cred is not None:
         try:
             info["credential"] = cred.summary()
@@ -485,6 +497,132 @@ def _last_user_text(messages: list) -> str:
             return ""
         return str(content)
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Responses API（供 Codex CLI 等只认 /v1/responses 的客户端使用）
+# ---------------------------------------------------------------------------
+
+def _resolve_model(requested: str | None) -> str:
+    """Codex 会发 gpt-5-codex 这类名字，上游不认。不在已知列表里就回落到默认模型。"""
+    if requested and requested in DEFAULT_MODELS:
+        return requested
+    fallback = CONFIG.get("default_model") or "auto"
+    if requested and requested != fallback:
+        _log(f"   模型 '{requested}' 不在可用列表，改用 '{fallback}'")
+    return fallback
+
+
+@app.post("/v1/responses")
+async def responses_endpoint(request: Request,
+                             authorization: Optional[str] = Header(default=None),
+                             x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
+    _check_auth(authorization, x_api_key)
+    if ResponsesStreamConverter is None:
+        raise HTTPException(status_code=503, detail={"error": {
+            "message": "responses_adapter 模块缺失，/v1/responses 不可用", "type": "server_error"}})
+    cred = _cred()
+
+    try:
+        payload = await request.json()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"error": {"message": f"bad json: {e}", "type": "invalid_request_error"}})
+
+    try:
+        body = responses_request_to_chat(payload)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"error": {"message": f"responses 请求转换失败: {e}", "type": "invalid_request_error"}})
+
+    if not body.get("messages"):
+        raise HTTPException(status_code=400, detail={"error": {"message": "input is required", "type": "invalid_request_error"}})
+
+    client_wants_stream = bool(payload.get("stream"))
+    model_name = _resolve_model(body.get("model"))
+    body["model"] = model_name
+    body["stream"] = True
+    if "stream_options" not in body:
+        body["stream_options"] = {"include_usage": True}
+    if CONFIG.get("desensitize"):
+        body = desensitize_body(body, roles=("system",))
+
+    n_msgs = len(body["messages"])
+    tool_names = [t.get("function", {}).get("name") for t in (body.get("tools") or [])]
+    rid = os.urandom(4).hex()
+    _log(f"[{rid}] ▶ REQUEST(responses) {model_name} | stream={client_wants_stream} | msgs={n_msgs}"
+         + (f" | tools={tool_names}" if tool_names else ""))
+    if CONFIG.get("dump_body"):
+        _log(f"[{rid}] ── REQUEST BODY(responses→chat) ──\n{json.dumps(body, ensure_ascii=False, indent=2)[:400000]}")
+
+    try:
+        headers = cred.get_headers(with_device=bool(CONFIG.get("device_token")))
+    except Exception as e:
+        _log(f"[{rid}] ✗ 凭据错误 | {e}")
+        raise HTTPException(status_code=503, detail={"error": {"message": str(e), "type": "auth_error"}})
+    url = f"{BACKEND}/v2/chat/completions"
+    t0 = time.time()
+
+    if client_wants_stream:
+        return StreamingResponse(
+            _stream_responses(url, headers, body, model_name, t0, rid),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # 非流式：消费上游 SSE，组装成完整 Response 对象
+    conv = ResponsesStreamConverter(model=model_name)
+    try:
+        async with httpx.AsyncClient(timeout=300) as c:
+            async with c.stream("POST", url, headers=headers, json=body) as r:
+                if r.status_code != 200:
+                    raw = await r.aread()
+                    _log(f"[{rid}] ✗ HTTP {r.status_code} | {model_name} | {_truncate(raw.decode('utf-8','replace'),200)}")
+                    raise HTTPException(status_code=r.status_code, detail=_safe_err_raw(raw, r.status_code))
+                async for line in r.aiter_lines():
+                    conv.feed_line(line)
+    except HTTPException:
+        raise
+    except httpx.HTTPError as e:
+        _log(f"[{rid}] ✗ 网络错误 | {model_name} | {e}")
+        raise HTTPException(status_code=502, detail={"error": {"message": f"upstream error: {e}", "type": "upstream_error"}})
+
+    result = conv.get_nonstream_response()
+    _log(f"[{rid}] ◀ RESPONSE(responses) {model_name} | {time.time() - t0:.1f}s | "
+         f"output_items={len(result.get('output') or [])} | "
+         f"tokens={(result.get('usage') or {}).get('total_tokens', '?')}")
+    return JSONResponse(content=result)
+
+
+async def _stream_responses(url: str, headers: dict, body: dict,
+                            model_name: str = "?", t0: float = 0.0, rid: str = ""):
+    """把上游 Chat SSE 实时翻译成 Responses 语义事件流。"""
+    prefix = f"[{rid}] " if rid else ""
+    conv = ResponsesStreamConverter(model=model_name)
+    try:
+        async with httpx.AsyncClient(timeout=None) as c:
+            async with c.stream("POST", url, headers=headers, json=body) as r:
+                if r.status_code != 200:
+                    err = await r.aread()
+                    _log(f"{prefix}✗ HTTP {r.status_code} | {model_name} | {_truncate(err.decode('utf-8','replace'),200)}")
+                    yield _responses_err(err, r.status_code)
+                    return
+                async for line in r.aiter_lines():
+                    ev = conv.feed_line(line)
+                    if ev:
+                        yield ev.encode("utf-8")
+        done = conv.finish()
+        if done:
+            yield done.encode("utf-8")
+    except httpx.HTTPError as e:
+        _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
+        yield _responses_err(str(e).encode(), 502)
+    _log(f"{prefix}◀ RESPONSE(responses) {model_name} | {time.time() - t0:.1f}s | stream done")
+
+
+def _responses_err(msg: bytes, status: int) -> bytes:
+    payload = {"type": "error",
+               "error": {"message": msg.decode("utf-8", "replace")[:500],
+                         "type": "upstream_error", "code": status}}
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
 
 
 def _log_finish(model_name: str, t0: float, result: dict, rid: str = ""):
@@ -635,12 +773,18 @@ def main():
     ap.add_argument("--desensitize", action="store_true", help="启用脱敏模块")
     ap.add_argument("--device-token", action="store_true",
                     help="注入 X-Device-Token 设备风控头（需要桌面端 TuringShield SDK 可用）")
+    ap.add_argument("--default-model", default="auto", metavar="NAME",
+                    help="Codex 等客户端发来的未知模型名回落到该模型（默认 auto）")
+    ap.add_argument("--dump-body", action="store_true",
+                    help="把每个请求转换后的完整 body 写进日志（排障用，含对话内容）")
     ap.add_argument("--skip-check", action="store_true", help="跳过启动预检")
     args = ap.parse_args()
 
     CONFIG["api_key"] = args.api_key
     CONFIG["desensitize"] = args.desensitize
     CONFIG["device_token"] = args.device_token
+    CONFIG["default_model"] = args.default_model
+    CONFIG["dump_body"] = args.dump_body
     CONFIG["log_path"] = args.log if args.log else os.environ.get("CODEBUDDY2OPENAI_LOG")
     af = find_auth_file()
     CONFIG["cred"] = CredentialManager(af) if af else None
@@ -655,7 +799,10 @@ def main():
     sys.stderr.write(f"\n✅ 监听 http://{args.host}:{args.port}\n")
     sys.stderr.write("   GET  /v1/models\n")
     sys.stderr.write("   POST /v1/chat/completions\n")
+    sys.stderr.write("   POST /v1/responses          (Codex CLI 等)\n")
     sys.stderr.write("   GET  /health\n")
+    if ResponsesStreamConverter is None:
+        sys.stderr.write("   ⚠️ responses_adapter 缺失，/v1/responses 不可用\n")
     if args.api_key:
         sys.stderr.write("   鉴权已启用\n")
     if CONFIG["log_path"]:
