@@ -26,6 +26,8 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from converter import CredentialManager, find_auth_file
+
 HERE = Path(__file__).resolve().parent
 CONVERTER = HERE / "converter.py"
 PANEL_PORT = 8788
@@ -150,19 +152,34 @@ async function refresh(){
     $('btnStop').style.display  = d.running ? '' : 'none';
     $('base').textContent = 'http://127.0.0.1:' + d.port + '/v1';
     if(d.log) { $('log').textContent = d.log; }
-    if(d.credential){
-      const c = d.credential, e = d.credential_error;
-      $('acct').innerHTML = e
-        ? '<dt>错误</dt><dd style="color:var(--err)">' + esc(e) + '</dd>'
-        : '<dt>账号</dt><dd>' + esc(c.nickname || '-') + '</dd>'
-        + '<dt>uid</dt><dd>' + esc(c.uid || '-') + '</dd>'
-        + '<dt>token</dt><dd>' + esc(c.token_type || '-') + '（' + (c.token_len||0) + ' 字符）</dd>'
-        + '<dt>有效期</dt><dd>' + esc(c.token_expired ? '已过期，将自动刷新' : '有效（约 ' + Math.round(((c.token_expires_at||0)/1000 - Date.now()/1000)/86400) + ' 天）') + '</dd>';
-    }
+    renderAcct(d);
     $('hint').textContent = d.running
       ? '服务已在本地运行，直接用上方的 API Base 调用即可。关闭后所有客户端请求会立即失败。'
       : '点击「开启服务」启动。首次启动会解密桌面端登录凭据，需要桌面端保持登录状态。';
   }catch(e){ $('status').textContent = '面板通信失败'; }
+}
+
+function renderAcct(d){
+  const c = d.credential, e = d.credential_error;
+  if(e){
+    $('acct').innerHTML = '<dt>错误</dt><dd style="color:var(--err)">' + esc(e) + '</dd>';
+    return;
+  }
+  if(!c){
+    $('acct').innerHTML = '<dt>状态</dt><dd style="color:var(--sub)">读取中…（首次解密需要几秒）</dd>';
+    return;
+  }
+  const exp = c.token_expires_at || 0;
+  const days = Math.round((exp/1000 - Date.now()/1000)/86400);
+  const from = d.credential_source === 'panel' ? '本地读取' : '服务实时';
+  $('acct').innerHTML =
+      '<dt>账号</dt><dd>' + esc(c.nickname || '-') + '</dd>'
+    + '<dt>uid</dt><dd>' + esc(c.uid || '-') + '</dd>'
+    + '<dt>token</dt><dd>' + esc(c.token_type || '-') + '（' + (c.token_len||0) + ' 字符）</dd>'
+    + '<dt>有效期</dt><dd>' + esc(c.token_expired
+        ? '已过期，开启服务时会自动刷新'
+        : (days > 0 ? '约 ' + days + ' 天后过期' : '即将过期')) + '</dd>'
+    + '<dt>来源</dt><dd style="color:var(--sub)">' + from + '</dd>';
 }
 
 function esc(s){ return String(s).replace(/[&<>"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m])); }
@@ -269,6 +286,58 @@ def _uptime() -> str:
     return f"{s // 3600} 小时 {(s % 3600) // 60} 分"
 
 
+# ---------------------------------------------------------------------------
+# 凭据快照：面板自己读，不依赖转换器是否在运行
+# ---------------------------------------------------------------------------
+
+_cred_lock = threading.Lock()
+_cred_cache: dict = {"mtime": object(), "credential": None, "error": None}
+_cred_warm_lock = threading.Lock()
+
+
+def _cred_snapshot(fresh: bool = False) -> tuple[dict | None, str | None]:
+    """返回 (凭据摘要, 错误信息)。按 auth 文件 mtime 缓存，避免每次轮询都 fork 客户端。
+
+    解密要调一次桌面端 Electron 二进制（几百毫秒），所以必须缓存。
+    """
+    path = find_auth_file()
+    if path is None:
+        return None, "未找到登录文件：请先在 WorkBuddy / CodeBuddy 桌面端登录"
+
+    try:
+        mt = path.stat().st_mtime
+    except OSError:
+        mt = None
+
+    with _cred_lock:
+        if not fresh and mt is not None and _cred_cache["mtime"] == mt:
+            return _cred_cache["credential"], _cred_cache["error"]
+
+    try:
+        cred = CredentialManager(path).summary()
+        err = None
+    except Exception as e:
+        cred, err = None, str(e)
+
+    with _cred_lock:
+        _cred_cache.update(mtime=mt, credential=cred, error=err)
+    return cred, err
+
+
+def warm_credentials() -> None:
+    """启动时在后台线程预热一次，避免首屏等解密。幂等。"""
+    def _run():
+        try:
+            _cred_snapshot(fresh=True)
+        except Exception:
+            pass
+        finally:
+            _cred_warm_lock.release()
+
+    if _cred_warm_lock.acquire(blocking=False):
+        threading.Thread(target=_run, daemon=True, name="wb-cred-warmup").start()
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return PAGE
@@ -276,15 +345,26 @@ def index():
 
 @app.get("/api/status")
 def status():
-    health = _probe_converter() if _is_alive(_state["proc"]) else {}
+    running = _is_alive(_state["proc"])
+    health = _probe_converter() if running else {}
+
+    # 凭据：转换器在跑就优先用它的（token 可能已被刷新），否则面板自己读。
+    cred = health.get("credential")
+    err = health.get("credential_error")
+    source = "converter"
+    if not cred and not err:
+        cred, err = _cred_snapshot()
+        source = "panel"
+
     return {
-        "running": _is_alive(_state["proc"]),
+        "running": running,
         "uptime": _uptime(),
         "port": _state["port"],
         "log": _tail_log(),
         "last_error": _state["last_error"],
-        "credential": health.get("credential"),
-        "credential_error": health.get("credential_error"),
+        "credential": cred,
+        "credential_error": err,
+        "credential_source": source,
         "user_agent": health.get("user_agent"),
         "device_token": health.get("device_token"),
     }
@@ -330,6 +410,9 @@ def main():
 
     if not args.no_browser:
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()
+
+    # 后台预热凭据，让首屏不用等解密
+    warm_credentials()
 
     uvicorn.run(app, host="127.0.0.1", port=PANEL_PORT, log_level="warning")
 
