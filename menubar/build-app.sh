@@ -17,6 +17,43 @@ echo "== 编译（swiftc）=="
 swiftc -O -o "${BIN}" "${HERE}/main.swift" -framework AppKit
 echo "   二进制: $(du -h "${BIN}" | cut -f1)"
 
+echo "== 生成图标 =="
+swiftc -O -o "${BUILD}/make-icon" "${HERE}/make-icon.swift" -framework AppKit
+"${BUILD}/make-icon" "${BUILD}/icon-1024.png"
+
+# 渐变图 PNG 体积很大（近 1 MB）。有 Pillow 就量化到 256 色，能压到 ~15 KB 且肉眼无差；
+# 没有就原样用，只是包大一点，不影响功能。
+if python3 -c "import PIL" >/dev/null 2>&1; then
+  python3 - "${BUILD}/icon-1024.png" <<'PY'
+import os, sys
+from PIL import Image
+p = sys.argv[1]
+im = Image.open(p).convert("RGBA")
+before = os.path.getsize(p)
+im.quantize(colors=256, method=Image.FASTOCTREE,
+            dither=Image.FLOYDSTEINBERG).save(p, optimize=True)
+print(f"   量化: {before//1024} KB -> {os.path.getsize(p)//1024} KB")
+PY
+else
+  echo "   （未装 Pillow，跳过量化）"
+fi
+
+ICONSET="${BUILD}/AppIcon.iconset"
+mkdir -p "${ICONSET}"
+gen() { sips -z "$1" "$1" "${BUILD}/icon-1024.png" --out "${ICONSET}/$2" >/dev/null 2>&1; }
+gen 16   icon_16x16.png
+gen 32   icon_16x16@2x.png
+gen 32   icon_32x32.png
+gen 64   icon_32x32@2x.png
+gen 128  icon_128x128.png
+gen 256  icon_128x128@2x.png
+gen 256  icon_256x256.png
+gen 512  icon_256x256@2x.png
+gen 512  icon_512x512.png
+gen 1024 icon_512x512@2x.png
+iconutil -c icns "${ICONSET}" -o "${APP}/Contents/Resources/AppIcon.icns"
+echo "   icns: $(du -h "${APP}/Contents/Resources/AppIcon.icns" | cut -f1)"
+
 echo "== 拷贝脚本到 Resources =="
 for f in converter.py wb_decode.py wb_panel.py bootstrap.py desensitize.py \
          responses_adapter.py turing_helper.js setup-dsh.py check-dsh.py \
@@ -40,6 +77,7 @@ cat > "${APP}/Contents/Info.plist" <<'PLIST'
   <key>CFBundleDisplayName</key><string>WB-OpenAI 网关</string>
   <key>CFBundleIdentifier</key><string>cn.wbopenai.menubar</string>
   <key>CFBundleExecutable</key><string>WBOpenAI</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0.0</string>
   <key>CFBundleVersion</key><string>1</string>

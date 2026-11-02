@@ -431,7 +431,8 @@ Windows `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\*.info`。
 wb-openai/
 ├── menubar/                # macOS 菜单栏 App 源码与构建脚本
 │   ├── main.swift          # Swift 源码（含 --selftest 自检模式）
-│   ├── build-app.sh        # 编译 + 组装 .app + ad-hoc 签名
+│   ├── make-icon.swift     # 用代码画 App 图标（圆角渐变 + 闪电）
+│   ├── build-app.sh        # 编译 + 画图标 + 组装 .app + ad-hoc 签名
 │   └── build/WBOpenAI.app  # 构建产物（也可直接用 dist/ 里那份）
 ├── 启动面板.command    # macOS 双击启动
 ├── start-panel.bat     # Windows 双击启动
