@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -146,7 +147,8 @@ async function refresh(){
     running = d.running;
     $('dot').className = 'dot' + (d.running ? ' on' : (d.last_error ? ' err' : ''));
     $('status').innerHTML = d.running
-      ? '运行中' + (d.uptime ? ' <small>已运行 ' + d.uptime + '</small>' : '')
+      ? '运行中' + (d.uptime ? ' <small>已运行 ' + d.uptime + '</small>'
+                             : (d.owned === false ? ' <small>由菜单栏 App 或其他方式启动</small>' : ''))
       : '已停止' + (d.last_error ? ' <small style="color:var(--err)">' + esc(d.last_error) + '</small>' : '');
     $('btnStart').style.display = d.running ? 'none' : '';
     $('btnStop').style.display  = d.running ? '' : 'none';
@@ -154,7 +156,9 @@ async function refresh(){
     if(d.log) { $('log').textContent = d.log; }
     renderAcct(d);
     $('hint').textContent = d.running
-      ? '服务已在本地运行，直接用上方的 API Base 调用即可。关闭后所有客户端请求会立即失败。'
+      ? (d.owned === false
+          ? '服务在运行（不是本面板启动的）。这里点「关闭服务」会按端口把它停掉。'
+          : '服务已在本地运行，直接用上方的 API Base 调用即可。关闭后所有客户端请求会立即失败。')
       : '点击「开启服务」启动。首次启动会解密桌面端登录凭据，需要桌面端保持登录状态。';
   }catch(e){ $('status').textContent = '面板通信失败'; }
 }
@@ -215,6 +219,11 @@ def _start():
     with _state_lock:
         if _is_alive(_state["proc"]):
             return {"ok": True, "msg": "已在运行"}
+        # 端口上已经有人应答 → 是菜单栏 App / 命令行 / 残留进程启的，
+        # 不能再起一个（会 bind 失败），直接告诉调用方"已在运行"。
+        if _probe_converter():
+            return {"ok": True, "msg": "已在运行（由其他方式启动）"}
+
         log_path = _state["log_path"]
         args = [sys.executable, str(CONVERTER), "--port", str(_state["port"])]
         if log_path:
@@ -232,23 +241,51 @@ def _start():
         return {"ok": True, "msg": "已启动"}
 
 
+def _terminate(proc) -> None:
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    except Exception:
+        pass
+
+
 def _stop():
     with _state_lock:
+        # 先关自己启的那个
         proc = _state["proc"]
-        if not _is_alive(proc):
-            _state["proc"] = None
-            return {"ok": True, "msg": "未在运行"}
-        try:
-            proc.terminate()
+        if _is_alive(proc):
+            _terminate(proc)
+        _state["proc"] = None
+
+        # 再按端口清残留：可能是菜单栏 App 启的，也可能是上次没退干净的。
+        # 不这么做就会出现「面板说已停止、实际端口还活着」。
+        deadline = time.time() + 6
+        while time.time() < deadline:
+            pids = _port_pids()
+            if not pids:
+                break
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except Exception:
+                    pass
+            time.sleep(0.3)
+
+        # 还不走就硬杀
+        for pid in _port_pids():
             try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        except Exception as e:
-            _state["last_error"] = f"停止失败：{e}"
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+
+        time.sleep(0.2)
+        if _port_pids():
+            _state["last_error"] = "停止后端口仍被占用"
             return {"ok": False, "msg": _state["last_error"]}
-        finally:
-            _state["proc"] = None
+        _state["last_error"] = ""
         return {"ok": True, "msg": "已停止"}
 
 
@@ -275,7 +312,36 @@ def _probe_converter() -> dict:
     return {}
 
 
+def _port_pids() -> list[int]:
+    """找出监听转换器端口的进程 PID。
+
+    为什么不只靠 subprocess 句柄：转换器可能不是面板启的（菜单栏 App、命令行、
+    或上次残留），句柄拿不到但它确实在跑。端口是唯一可信的真相源。
+    """
+    port = _state["port"]
+    pids: list[int] = []
+    try:
+        if os.name == "nt":
+            r = subprocess.run(["netstat", "-ano", "-p", "TCP"],
+                               capture_output=True, text=True, timeout=5)
+            for line in r.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 5 and parts[1].endswith(f":{port}") \
+                        and parts[3].upper() == "LISTENING":
+                    if parts[4].isdigit():
+                        pids.append(int(parts[4]))
+        else:
+            r = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                               capture_output=True, text=True, timeout=5)
+            pids = [int(x) for x in r.stdout.split() if x.strip().isdigit()]
+    except Exception:
+        pass
+    # 去重，且绝不误杀自己
+    return sorted({p for p in pids if p != os.getpid()})
+
+
 def _uptime() -> str:
+    # 只有自己启的才知道运行时长；外部进程只能显示"在跑"
     if not _is_alive(_state["proc"]):
         return ""
     s = int(time.time() - _state["started_at"])
@@ -345,8 +411,11 @@ def index():
 
 @app.get("/api/status")
 def status():
-    running = _is_alive(_state["proc"])
-    health = _probe_converter() if running else {}
+    # 真相源是端口，不是进程句柄 —— 转换器可能由菜单栏 App 或命令行启动，
+    # 面板没有它的句柄。只认句柄就会出现「实际在跑但页面显示已停止」。
+    health = _probe_converter()
+    owned = _is_alive(_state["proc"])
+    running = owned or bool(health)
 
     # 凭据：转换器在跑就优先用它的（token 可能已被刷新），否则面板自己读。
     cred = health.get("credential")
@@ -358,6 +427,7 @@ def status():
 
     return {
         "running": running,
+        "owned": owned,
         "uptime": _uptime(),
         "port": _state["port"],
         "log": _tail_log(),
