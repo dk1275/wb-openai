@@ -10,8 +10,8 @@ GLM-5.2 / Kimi / DeepSeek V4。
 🖥️ **桌面端 App** 在界面里手动配（[看这里](#21-桌面端-appgui-必看)）；
 ⌨️ **命令行 / 服务端** 跑一条脚本（[看这里](#22-命令行--服务端-一键脚本)）。
 
-自带 **Web 控制面板**，双击启动、页面上一个按钮开关，不用碰命令行。
-支持 **macOS / Windows / Linux**。
+macOS 有**菜单栏 App**，点一下图标就能开关；其他平台用自带的 **Web 控制面板**，
+双击脚本、页面上一个按钮。都不用碰命令行。支持 **macOS / Windows / Linux**。
 
 > ⚠️ **不支持 Codex CLI**，原因见下方专章。也别指望 Claude Code —— 同样被拦。
 
@@ -19,7 +19,37 @@ GLM-5.2 / Kimi / DeepSeek V4。
 
 ## 一、30 秒上手
 
-### 1. 起网关
+### macOS 首选：菜单栏 App
+
+装一次，以后点一下图标就能开关，不用开终端。
+
+1. 把 **`WBOpenAI.app`** 拖进「应用程序」
+2. 双击打开 —— 菜单栏出现 **⚡** 图标（不进 Dock，不占地方）
+3. 点图标 → **开启服务**
+
+> 首次双击若提示「无法打开，因为来自身份不明的开发者」：**右键点 App → 选「打开」→ 再点「打开」**。
+> 只需一次，之后正常双击。
+>
+> **首次开启要装 Python 依赖，约 1～2 分钟**，菜单会显示「启动中…」，别急着关。
+> 装好后存在 `~/.wb-openai/.venv`，以后启动只要 1～2 秒。
+
+菜单里能做的事：
+
+| 菜单项 | 说明 |
+|---|---|
+| `● 运行中 · glm-5.2` / `○ 已停止` | 状态行，带当前模型 |
+| `账号：Wine · token 剩 28 天` | 凭据状态 |
+| **开启服务 / 关闭服务** | 点一下就切换 |
+| 打开 Web 面板 | 起面板并打开浏览器（8788） |
+| 复制 API Base | `http://127.0.0.1:8787/v1` |
+| 查看日志 | `~/.wb-openai/converter.log` |
+| 打开数据目录 | `~/.wb-openai/` |
+| 开机自启 | 写 `~/Library/LaunchAgents/cn.wbopenai.menubar.plist`，可再点关掉 |
+| 退出（并停止服务） | 退出时会一并停掉转换器，不留孤儿进程 |
+
+数据都在 `~/.wb-openai/`：脚本、`.venv`、日志。App 本体只读，升级 App 不影响 venv。
+
+### Windows / 不想装 App：双击脚本
 
 | 平台 | 操作 |
 |---|---|
@@ -32,7 +62,7 @@ GLM-5.2 / Kimi / DeepSeek V4。
 > macOS 首次双击如提示"来自身份不明的开发者"：右键点文件 → 选「打开」→ 再点「打开」。
 > Windows 需先装 Python 3.8+（[python.org](https://www.python.org/downloads/)），安装时勾选 **Add Python to PATH**。
 
-### 2. 接进 dsh
+### 接进 dsh
 
 **dsh 有两种用法，配置方式完全不同，别搞混：**
 
@@ -44,7 +74,7 @@ GLM-5.2 / Kimi / DeepSeek V4。
 > **桌面端不要用脚本。** 桌面端用的 `desktop` profile 由 Electron 应用独占管理，
 > 脚本默认不碰它，跑了也没用，还容易把配置搞乱。
 
-### 3. 用
+### 用
 
 ```bash
 dsh headless "读一下 a.txt 并总结"     # 一次性任务（命令行）
@@ -399,6 +429,10 @@ Windows `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\*.info`。
 
 ```
 wb-openai/
+├── menubar/                # macOS 菜单栏 App 源码与构建脚本
+│   ├── main.swift          # Swift 源码（含 --selftest 自检模式）
+│   ├── build-app.sh        # 编译 + 组装 .app + ad-hoc 签名
+│   └── build/WBOpenAI.app  # 构建产物（也可直接用 dist/ 里那份）
 ├── 启动面板.command    # macOS 双击启动
 ├── start-panel.bat     # Windows 双击启动
 ├── bootstrap.py        # 依赖自举（建 venv + 装依赖 + 转发执行）
@@ -412,6 +446,22 @@ wb-openai/
 ├── turing_helper.js    # 设备风控头助手（可选）
 └── start.sh            # 纯命令行启动
 ```
+
+### 自己重新构建菜单栏 App
+
+改了脚本想重新打包：
+
+```bash
+cd menubar
+./build-app.sh                    # 产物在 menubar/build/WBOpenAI.app
+./build/WBOpenAI.app/Contents/MacOS/WBOpenAI --selftest   # 自检（不弹 UI）
+```
+
+`--selftest` 会跑完整链路：同步脚本 → 启动转换器 → 读 `/health` → 发一次真实对话 →
+停止并确认端口释放。改成不通过就不会说通过。
+
+> App 是 ad-hoc 签名的。自己用没问题；发给别人时对方需要右键「打开」一次。
+> 要做正式分发得用 Apple Developer ID 签名 + 公证，那是另一件事。
 
 ---
 

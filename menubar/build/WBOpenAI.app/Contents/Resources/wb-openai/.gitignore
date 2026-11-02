@@ -1,0 +1,9 @@
+# 运行时产物
+.venv/
+__pycache__/
+*.pyc
+*.log
+# 本地凭据 / 密钥，绝不入库
+*.info
+*.key
+.env
