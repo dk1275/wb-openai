@@ -452,6 +452,8 @@ async def chat_completions(request: Request,
     _log(f"[{rid}] ▶ REQUEST {model_name} | stream={client_wants_stream} | msgs={len(messages)}"
          + (f" | tools={tool_names}" if tool_names else "")
          + (f" | last_user={_truncate(last_user, 60)!r}" if last_user else ""))
+    if CONFIG.get("dump_body"):
+        _log(f"[{rid}] ── REQUEST BODY ──\n{json.dumps(body, ensure_ascii=False, indent=2)[:400000]}")
 
     try:
         headers = cred.get_headers(with_device=bool(CONFIG.get("device_token")))

@@ -1,19 +1,39 @@
-# WorkBuddy 订阅 → DeepSeek Harness
+# WorkBuddy 订阅 → OpenAI 兼容 API
 
-**让你的本地 agent 用上 WorkBuddy 的积分。**
+**把你的本地客户端接上 WorkBuddy 的积分。**
 
-把本机已登录的 WorkBuddy / CodeBuddy 桌面端订阅，变成一个标准的 OpenAI 兼容服务，
-再接入 **DeepSeek Harness（dsh）** —— 之后 dsh 跑的就是 WorkBuddy 积分里的
-GLM-5.2 / Kimi / DeepSeek V4。
-
-**dsh 有两种用法，配置方式完全不同**：
-🖥️ **桌面端 App** 在界面里手动配（[看这里](#21-桌面端-appgui-必看)）；
-⌨️ **命令行 / 服务端** 跑一条脚本（[看这里](#22-命令行--服务端-一键脚本)）。
+把本机已登录的 WorkBuddy / CodeBuddy 桌面端订阅，变成一个标准的 OpenAI 兼容服务
+（`/v1/chat/completions` + `/v1/responses`），Cherry Studio / LobeChat / Open WebUI
+或任意 OpenAI SDK 直接就能连。
 
 macOS 有**菜单栏 App**，点一下图标就能开关；其他平台用自带的 **Web 控制面板**，
 双击脚本、页面上一个按钮。都不用碰命令行。支持 **macOS / Windows / Linux**。
 
-> ⚠️ **不支持 Codex CLI**，原因见下方专章。也别指望 Claude Code —— 同样被拦。
+---
+
+## ⛔ 先看这里：哪些客户端能用
+
+腾讯在后端做**渠道校验**，会按客户端的 system prompt 指纹逐个封杀第三方 agent 框架。
+**这不是协议问题，改配置解决不了。** 截至 2026-11-02 实测：
+
+| 客户端 | 状态 | 说明 |
+|---|---|---|
+| Cherry Studio / NextChat / LobeChat / Open WebUI | ✅ **能用** | 通用 chat 客户端，不带竞品指纹 |
+| 任意 OpenAI SDK / 自己写的脚本 | ✅ **能用** | 同上 |
+| **Codex CLI** | ❌ 被拦 | 触发点：其 system prompt 开头 185 字符 |
+| **Claude Code** | ❌ 被拦 | 触发点：`You are Claude Code, Anthropic's official CLI...` |
+| **DeepSeek Harness（dsh）** | ❌ **2026-11-02 起被拦** | 触发点：`You are an AI agent powered by DeepSeek Harness.` |
+
+三类拦截都是**整串指纹匹配**：三句连在一起才触发，改一个词就过。
+所以这不是"能不能适配"的问题，是对方在按名单封。
+
+> 想用 Codex / Claude Code / dsh 的话，继续用你原来的第三方 provider。
+> 本项目的价值在于：**给通用客户端供一个本地 API**。
+>
+> 我不做改写客户端提示去绕识别那套 —— 那是规避渠道风控，账号有风险，
+> 而且是长期猫鼠游戏，下次对方一更新又得改。
+
+深挖过程与实验矩阵见 [第四章](#四客户端指纹拦截实测记录)。
 
 ---
 
@@ -62,30 +82,44 @@ macOS 有**菜单栏 App**，点一下图标就能开关；其他平台用自带
 > macOS 首次双击如提示"来自身份不明的开发者"：右键点文件 → 选「打开」→ 再点「打开」。
 > Windows 需先装 Python 3.8+（[python.org](https://www.python.org/downloads/)），安装时勾选 **Add Python to PATH**。
 
-### 接进 dsh
+### 接客户端
 
-**dsh 有两种用法，配置方式完全不同，别搞混：**
+macOS 菜单栏 App 起来之后，任何 OpenAI 兼容客户端填这两行就能用：
 
-| 你用哪个 | 怎么配 | 跳到 |
-|---|---|---|
-| 🖥️ **桌面端 App**（图形界面，双击图标打开那个） | 在 App 的 **设置 → 模型** 里手动填 | [2.1](#21-桌面端-appgui-必看) |
-| ⌨️ **命令行 / 服务端**（`dsh web`、`dsh headless`） | 跑一条脚本 | [2.2](#22-命令行--服务端-一键脚本) |
+| 项 | 值 |
+|---|---|
+| API Base | `http://127.0.0.1:8787/v1` |
+| API Key | 留空（未启用鉴权） |
 
-> **桌面端不要用脚本。** 桌面端用的 `desktop` profile 由 Electron 应用独占管理，
-> 脚本默认不碰它，跑了也没用，还容易把配置搞乱。
+Cherry Studio、NextChat、LobeChat、Open WebUI、任意 OpenAI SDK 都行。
+
+> ⚠️ **别用 Codex CLI / Claude Code / dsh**，它们的系统提示被上游列进黑名单了，
+> 一定会报 `code 11128`。详见 [顶部支持矩阵](#⛔-先看这里哪些客户端能用)。
 
 ### 用
 
 ```bash
-dsh headless "读一下 a.txt 并总结"     # 一次性任务（命令行）
-dsh web                                 # 浏览器界面（命令行）
+curl -s http://127.0.0.1:8787/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm-5.2","messages":[{"role":"user","content":"你好"}]}'
 ```
 
-桌面端就正常打开 App 用。
+返回带 `content` 就通了。
 
 ---
 
-## 二、接入 DeepSeek Harness（dsh）
+## 二、接入 DeepSeek Harness（dsh）—— 已失效，仅存档
+
+> ⛔ **2026-11-02 起，dsh 已经走不通了。**
+>
+> 腾讯新增了对 dsh 的指纹拦截，触发点就是它 system prompt 的首句：
+> `You are an AI agent powered by DeepSeek Harness.`（换成别的名字就能过，整串匹配）。
+>
+> dsh 版本没变（仍是 0.2.0-rc.2），所以**不是它升级导致的，是上游策略变了**。
+> 下面这套配置步骤本身仍然正确，但请求会被上游 400 掉。
+>
+> **这一章保留下来当历史记录和配置参考。真要现在能用，请回
+> [顶部支持矩阵](#⛔-先看这里哪些客户端能用) 挑一个没被拦的客户端。**
 
 ### 2.1 桌面端 App（GUI）—— 必看
 
@@ -170,14 +204,16 @@ python3 check-dsh.py --profile desktop
 
 ---
 
-### 2.4 实测结果（2026-10-13，macOS）
+### 2.4 当时的实测结果（2026-10-13，已失效）
+
+> 下面这些是 10-13 的记录，**11-02 起已被上游拦截**，仅作历史对照。
 
 | 检查项 | 结果 |
 |---|---|
 | 桌面端 App 配置（协议 / Key / 模型 / 默认） | ✅ `check-dsh.py` 全绿 |
 | `dsh headless "只回复两个字：在的"` | ✅ 返回「在的」 |
 | 完整 agent 任务（读 a.txt → 建 b.txt → 写入内容） | ✅ 文件真的被创建、内容正确 |
-| 请求规模 | 24 个工具 + 多轮对话，**未被上游风控拦** |
+| 请求规模 | 24 个工具 + 多轮对话，当时未被拦 |
 | `dsh --profile web --dump-config` 出现 `wb-local` | ✅ |
 | `dsh web` 启动 + 模型选择器 | ✅ 可选「WorkBuddy 本地网关」 |
 
@@ -193,7 +229,7 @@ DeepSeek V4 Flash、Kimi K2.7、auto；想加就在 `cordis.patch.yml` 的 `mode
 
 ---
 
-## 三、⚠️ 不支持 Codex CLI
+## 三、客户端指纹拦截实测记录
 
 网关实现了 `/v1/responses`（Responses API），**协议层面 Codex CLI 能接通，
 但实际发请求会被上游拦下**：
@@ -238,20 +274,35 @@ HTTP 400  {"code":11128, "msg":"Illegal API invocation from an unapproved channe
 
 ### 其他 harness 能用吗？
 
-关键不在"哪个 harness"，而在**它的系统提示是否带竞品指纹**。实测：
+关键不在"哪个 harness"，而在**它的系统提示有没有被列进黑名单**。
 
 | harness 系统提示风格 | 结果 |
 |---|---|
-| DeepSeek Harness | ✅ 通过（已完整实测） |
 | Aider / Cline / OpenHands / Gemini CLI / Continue 风格 | ✅ 通过 |
 | 中文通用编程助手声明 | ✅ 通过 |
 | **Codex CLI 官方提示** | ❌ 被拦 |
 | **Claude Code 官方提示** | ❌ 被拦 |
+| **DeepSeek Harness 官方提示** | ❌ 被拦（2026-11-02 起） |
 
 > 上表除 dsh 外是**风格模拟测试**，不是各工具官方提示的逐字复现 ——
-> 指纹匹配对措辞敏感，官方原文可能与我模拟的不同。接入前建议先跑一次验证。
+> 指纹匹配对措辞敏感，官方原文可能与我模拟的不同。
 
 判断方法：接上后随便发一句，若报 `code 11128` 就是被识别了，否则能用。
+
+#### dsh 的拦截记录（2026-11-02）
+
+10-13 还能跑完整 agent 流程（24 个工具、读写文件都正常），11-02 突然全挂。
+
+| 测试 | 结果 |
+|---|---|
+| `You are an AI agent powered by DeepSeek Harness.` | ❌ 被拦 |
+| 只写 `DeepSeek Harness` / `DeepSeek` / `Harness` | ✅ 通过 |
+| `You are an AI agent powered by Something.` | ✅ 通过 |
+| 同上但换成 `Acme Harness` | ✅ 通过 |
+| 普通请求（无 dsh 指纹） | ✅ 通过 |
+
+**又是一次整串指纹匹配**：单写品牌名不触发，必须整句连起来。dsh 版本没变
+（仍是 0.2.0-rc.2），所以是对方新增规则。
 
 ---
 
@@ -291,7 +342,7 @@ python3 wb_panel.py --desensitize       # 开启时启用脱敏
 
 ---
 
-## 六、实测状态（2026-10-13，macOS + WorkBuddy 5.7.7）
+## 六、实测状态（最新复核 2026-11-02，macOS + WorkBuddy 5.9.3）
 
 | 能力 | 结果 |
 |---|---|
@@ -303,9 +354,11 @@ python3 wb_panel.py --desensitize       # 开启时启用脱敏
 | `/v1/responses`（Responses API） | ✅ 事件序列完整 |
 | 多模型切换 | ✅ |
 | 桌面端自动刷新 token 后 | ✅ 自动重新解密，无需重启 |
+| 菜单栏 App ↔ Web 面板状态同步 | ✅ 以端口为准，两边一致 |
+| 通用客户端（Cherry Studio 等） | ✅ |
+| Codex / Claude Code / dsh | ❌ 被上游指纹拦截 |
 | 面板一键启停 | ✅ |
 | 依赖自举（空环境） | ✅ 自动建 venv、装依赖、起面板 |
-| dsh 完整 agent 流程 | ✅ |
 
 ---
 
